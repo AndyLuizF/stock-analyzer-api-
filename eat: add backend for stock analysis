@@ -1,0 +1,69 @@
+import os
+import json
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import httpx
+
+app = FastAPI(title="Stock Analyzer API")
+
+# 允许所有来源（生产环境建议限制为你的 Vercel 域名）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+QWEN_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+
+class StockAnalysisRequest(BaseModel):
+    stock_code: str
+
+@app.post("/api/analyze")
+async def analyze_stock(request: StockAnalysisRequest):
+    code = request.stock_code.strip()
+    if not (code.isdigit() and 1 <= len(code) <= 6):
+        raise HTTPException(status_code=400, detail="请输入1-6位数字股票代码")
+
+    prompt = f"""
+你是一个专业机构级股票分析师，请对股票代码 {code} 进行深度研判。
+请严格按以下 JSON 格式输出，不要任何额外文本：
+{{
+  "sector": "所属行业",
+  "trend": "inflow 或 outflow",
+  "flow": "资金流金额（单位：亿，保留1位小数）",
+  "marketEmotion": "亢奋期|震荡期|冷静期",
+  "recommendation": "综合投资建议（100字以内，包含买卖策略）"
+}}
+"""
+
+    headers = {
+        "Authorization": f"Bearer {QWEN_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "qwen-max",
+        "input": {"messages": [{"role": "user", "content": prompt}]},
+        "parameters": {"temperature": 0.3, "max_tokens": 500}
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(QWEN_API_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            output_text = response.json()["output"]["text"]
+
+        # 提取 JSON
+        start = output_text.find("{")
+        end = output_text.rfind("}") + 1
+        if start == -1 or end <= start:
+            raise ValueError("未返回有效JSON")
+        result = json.loads(output_text[start:end])
+        return result
+
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail="分析服务异常，请重试")
